@@ -207,7 +207,9 @@ int temp_to_default_buff() {
 
 const char *TERMINATOR_STRING = "\" ";
 
-//returns a pointer to the end of the concatenated string
+/**
+ * Returns a pointer to the end of the concatenated string
+ */
 char* fast_strcat(char *dest, char *src){
 
 	while (*dest) dest++;		//skip to \0
@@ -215,6 +217,9 @@ char* fast_strcat(char *dest, char *src){
 	return --dest;				//return pointer to \0
 }
 
+/**
+ * Create a datapoint.
+ */
 uint8_t create_response_datapoint(char *buffer, char *typ, char *parent, char *href, char *unit, char* value, uint8_t asChild){
 
 	buffer[0]='\0';		//init empty string
@@ -249,40 +254,6 @@ uint8_t create_response_datapoint(char *buffer, char *typ, char *parent, char *h
 uint8_t create_response_datapoint_temperature(char *buffer,	int asChild) {
 	temp_to_default_buff();
 	return create_response_datapoint(buffer, "real", "temp","value", "obix:units/celsius", tempstring,1);
-	/*size_t size_temp;
-	int size_msgp1, size_msgp2;
-	const char *msgp1, *msgp2;
-	uint8_t size_msg;
-
-	if (asChild) {
-		msgp1 =
-				"<real href=\"temp/value\" units=\"obix:units/celsius\" val=\"";
-		size_msgp1 = 56;
-		msgp2 = "\"/>";
-		size_msgp2 = 3;
-
-	} else {
-		msgp1 = "<real href=\"value\" units=\"obix:units/celsius\" val=\"";
-		size_msgp1 = 51;
-		msgp2 = "\"/>\0";
-		size_msgp2 = 4;
-	}
-
-	msgp2 = "\"/>\0";
-	size_msgp2 = 4;
-
-	if ((size_temp = temp_to_default_buff()) < 0) {
-		PRINTF("Error preparing temperature string!\n");
-		return 0;
-	}
-
-	size_msg = size_msgp1 + size_msgp2 + size_temp;
-
-	memcpy(buffer, msgp1, size_msgp1);
-	memcpy(buffer + size_msgp1, tempstring, size_temp);
-	memcpy(buffer + size_msgp1 + size_temp, msgp2, size_msgp2);
-
-	return size_msg;*/
 }
 
 uint8_t create_response_object_temperature(char *buffer) {
@@ -710,35 +681,23 @@ void event_acc_freefall_event_handler(resource_t *r) {
 #if RES_LEDS
 /* Leds */
 uint8_t create_response_datapoint_led(char *buffer, int asChild, int color) {
-
-
-
-	int size_msgp1, size_msgp2, size_msgp3, size_color;
-	const char *msgp1, *msgp2, *msgp3, *msgp_red, *msgp_blue, *msgp_green;
-	char *msgp_color; // will point to red, blue or green
-
+	char *msgp_color="";
 	char *msgp_value = FALSE;
 
-
-	msgp_red = "red";
-	msgp_blue = "blue";
-	msgp_green = "green";
-
-
 	if(color == 0){ // red
-		msgp_color = msgp_red;
+		msgp_color = "red";
 
 		if(led_red == 1){
 			msgp_value = TRUE;
 		}
 	} else if(color == 1){
-		msgp_color = msgp_blue;
+		msgp_color = "blue";
 
 		if(led_blue == 1){
 			msgp_value = TRUE;
 		}
 	} else if(color == 2){
-		msgp_color = msgp_green;
+		msgp_color = "green";
 
 		if(led_green == 1){
 			msgp_value = TRUE;
@@ -906,35 +865,7 @@ void led_blue_handler(void* request, void* response, uint8_t *buffer,
 }
 #endif // RES_LEDS
 
-#if GROUP_COMM_ENABLED
-static void
-group_comm_handler(const uip_ipaddr_t *sender_addr,
-         const uip_ipaddr_t *receiver_addr,
-         const uint8_t *data,
-         uint16_t datalen)
-{
-	uint16_t groupIdentifier;
-	PRINT6ADDR(sender_addr);
-	PRINT6ADDR(receiver_addr);
-	uint8_t i,l=0;
 
-	groupIdentifier =  ((uint8_t *)receiver_addr)[14];
-    groupIdentifier <<= 8;
-    groupIdentifier += ((uint8_t *)receiver_addr)[15];
-    PRINTF("\n######### Data received on group comm handler with length %d for group identifier %d\n",
-		 datalen, groupIdentifier);
-
-    for(i = 0; i < MAX_GC_GROUPS; i++){
-    			if(gc_handlers[i].group_identifier == groupIdentifier){ // free slot or same slot
-    				for(l=0; l < MAX_GC_HANDLERS; l++){
-    					if(gc_handlers[i].handlers[l] != NULL){
-    						gc_handlers[i].handlers[l](data);
-    					}
-    				}
-    			}
-        	}
-}
-#endif
 
 PROCESS(iotsys_server, "IoTSyS");
 AUTOSTART_PROCESSES(&iotsys_server);

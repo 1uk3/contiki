@@ -72,5 +72,10 @@ char * iotsys_process_request(void* request, gc_handler groupCommHandler);
 
 void send_group_update(char* payload, size_t msgSize, gc_handler handler );
 
+void group_comm_handler(const uip_ipaddr_t *sender_addr,
+         const uip_ipaddr_t *receiver_addr,
+         const uint8_t *data,
+         uint16_t datalen);
+
 
 #endif /*IOTSYS_H_*/

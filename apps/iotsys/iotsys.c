@@ -353,3 +353,31 @@ void leave_group(int groupIdentifier, gc_handler handler){
 		}
 	}
 }
+
+void group_comm_handler(const uip_ipaddr_t *sender_addr,
+         const uip_ipaddr_t *receiver_addr,
+         const uint8_t *data,
+         uint16_t datalen)
+{
+	uint16_t groupIdentifier;
+	PRINT6ADDR(sender_addr);
+	PRINT6ADDR(receiver_addr);
+	uint8_t i,l=0;
+
+	groupIdentifier =  ((uint8_t *)receiver_addr)[14];
+    groupIdentifier <<= 8;
+    groupIdentifier += ((uint8_t *)receiver_addr)[15];
+    PRINTF("\n######### Data received on group comm handler with length %d for group identifier %d\n",
+		 datalen, groupIdentifier);
+
+    for(i = 0; i < MAX_GC_GROUPS; i++){
+    			if(gc_handlers[i].group_identifier == groupIdentifier){ // free slot or same slot
+    				for(l=0; l < MAX_GC_HANDLERS; l++){
+    					if(gc_handlers[i].handlers[l] != NULL){
+    						gc_handlers[i].handlers[l](data);
+    					}
+    				}
+    			}
+        	}
+}
+
