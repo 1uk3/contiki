@@ -536,48 +536,21 @@ int acc_to_default_buff() {
 
 /* Accs */
 uint8_t create_response_datapoint_acc(char *buffer, int asChild, int field) {
-
-	if(field == 0){ // active
-		return create_response_datapoint(buffer, "bool", "acc","active", NULL, TRUE, asChild);
+	char *typ = NULL;
+	char *value = FALSE;
+	if(field == 0){
+		typ = "active";
+		if(acc == ACC_ACTIVITY){
+			value = TRUE;
+		}
 	} else if(field == 1){
-		return create_response_datapoint(buffer, "bool", "acc","freefall", NULL, TRUE, asChild);
+		typ = "freefall";
+		if(acc == ACC_FREEFALL){
+			value = TRUE;
+		}
 	}
-
-	return create_response_datapoint(buffer, "bool", "acc", NULL, NULL, FALSE, asChild);
+	return create_response_datapoint(buffer, "bool", "acc", typ, NULL, value, asChild);
 }
-
-/*uint8_t create_response_datapoint_acc(char *buffer, int asChild, int freeFall) {
-	size_t size_acc;
-	int size_msgp1, size_msgp2;
-	const char *msgp1, *msgp2;
-	uint8_t size_msg;
-
-
-	if (asChild) {
-		msgp1 = "<bool href=\"acc/active\" val=\"";
-		size_msgp1 = 29;
-		msgp2 = "\"/>";
-		size_msgp2 = 3;
-	} else {
-		msgp1 = "<bool href=\"active\" val=\"";
-		size_msgp1 = 25;
-		msgp2 = "\"/>\0";
-		size_msgp2 = 4;
-	}
-
-	if ((size_acc = acc_to_default_buff()) < 0) {
-		PRINTF("Error preparing acc string!\n");
-		return 0;
-	}
-
-	size_msg = size_msgp1 + size_msgp2 + size_acc;
-
-	memcpy(buffer, msgp1, size_msgp1);
-	memcpy(buffer + size_msgp1, accstring, size_acc);
-	memcpy(buffer + size_msgp1 + size_acc, msgp2, size_msgp2);
-
-	return size_msg;
-}*/
 
 uint8_t create_response_object_acc(char *buffer) {
 
