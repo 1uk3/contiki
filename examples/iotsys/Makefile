@@ -66,20 +66,25 @@ APPS += er-http-engine
 endif
 
 APPS += erbium
+APPS += iotsys
+
+LDFLAGS += --stats
 
 # optional rules to get assembly
-#CUSTOM_RULE_C_TO_OBJECTDIR_O = 1
-#CUSTOM_RULE_S_TO_OBJECTDIR_O = 1
+CUSTOM_RULE_C_TO_OBJECTDIR_O = 1
+CUSTOM_RULE_S_TO_OBJECTDIR_O = 1
 
 include $(CONTIKI)/Makefile.include
 
 # optional rules to get assembly
-#$(OBJECTDIR)/%.o: asmdir/%.S
-#	$(CC) $(CFLAGS) -MMD -c $< -o $@
-#	@$(FINALIZE_DEPENDENCY)
-#
-#asmdir/%.S: %.c
-#	$(CC) $(CFLAGS) -MMD -S $< -o $@
+$(OBJECTDIR)/%.o: asmdir/%.S
+	$(CC) $(CFLAGS) -MMD -c $< -o $@
+	@$(FINALIZE_DEPENDENCY)
+
+asmdir/%.S: %.c
+	@echo "making asmdir: "
+	$(CC) $(CFLAGS) -MMD -S $< -o $@
+	@echo "asmdir done "
 
 # border router rules
 $(CONTIKI)/tools/tunslip6:	$(CONTIKI)/tools/tunslip6.c

@@ -43,7 +43,9 @@
 
 #include "erbium.h"
 
-#define RES_TEMP 0
+#include "iotsys.h"
+
+#define RES_TEMP 1
 #define RES_ACC 0
 #define RES_ACC_ACTIVE 0
 #define RES_ACC_FREEFALL 0
@@ -94,7 +96,7 @@
 #define PRINTLLADDR(addr)
 #endif
 
-#define CHUNKS_TOTAL        1024
+
 
 #define TEMP_MSG_MAX_SIZE   140   // more than enough right now
 #define TEMP_BUFF_MAX       7     // -234.6\0
@@ -107,13 +109,11 @@
 #define BATTERY_BUFF_MAX        4     // 0\0 ... 100\0
 
 
-// Group communication definition
-#define MAX_GC_HANDLERS 2
-#define MAX_GC_GROUPS 5
 
-typedef void (*gc_handler) (char*);
+extern gc_handler_t gc_handlers[MAX_GC_GROUPS];
+extern char payload_buffer[PUT_BUFFER_SIZE];
 
-#define PUT_BUFFER_SIZE 140
+
 /******************************************************************************/
 /* typedefs, enums  ***********************************************************/
 /******************************************************************************/
@@ -123,20 +123,12 @@ typedef enum {
 } acceleration_t;
 #endif
 
-// Data structure for storing group communication assignments.
-// It is intended to store only the group identifier
-// of a transient link-local scope multicast address (FF:12::XXXX)
-typedef struct {
-	int group_identifier;
-	gc_handler handlers[MAX_GC_HANDLERS];
-} gc_handler_t;
+
 
 /******************************************************************************/
 /* globals ********************************************************************/
 /******************************************************************************/
-#if GROUP_COMM_ENABLED
-	static struct simple_udp_connection broadcast_connection;
-#endif
+
 
 #if RES_TEMP
 char tempstring[TEMP_BUFF_MAX];
@@ -157,9 +149,7 @@ uint8_t acc_register_acc;
 process_event_t event_acc;
 #endif // RES_ACC
 
-char payload_buffer[PUT_BUFFER_SIZE];
-
-gc_handler_t gc_handlers[MAX_GC_GROUPS];
+char message[TEMP_MSG_MAX_SIZE];
 
 #if RES_LEDS
 int led_red = 0;
@@ -176,195 +166,12 @@ char batterystring[BATTERY_BUFF_MAX];
 /* helper functions ***********************************************************/
 /******************************************************************************/
 
-// creates an IPv6 address from the provided string
-// note: the provided string is manipulated.
-void get_ipv6_multicast_addr(char* input, uip_ip6addr_t* address){
-	// first draft, assume an IPv6 address with explicit notation like FF12:0000:0000:0000:0000:0000:0000:0001
-
-	// in this case the address shall be an char array with 32 (hex chars) + 7 (: delim) + 1 string delimiter
-	// replace all : with a whitespace
-	char* curChar;
-	char* pEnd;
-	int addr1, addr2,addr3, addr4, addr5, addr6, addr7, addr8;
-
-	// move to the beginning of the IPv6 address --> assume it starts with FF
-	input = strstr(input, "FF");
-
-	curChar = strchr(input, ':');
-
-	while (curChar != NULL)
-	{
-	   *curChar = ' '; // replace : with space
-	   curChar=strchr(curChar+1,':');
-	}
-
-	addr1 = strtol(input,&pEnd,16); // FF12 block
-	addr2 = strtol(pEnd, &pEnd,16); // 0000 block
-	addr3 = strtol(pEnd, &pEnd,16); // 0000 block
-	addr4 = strtol(pEnd, &pEnd,16); // 0000 block
-	addr5 = strtol(pEnd, &pEnd,16); // 0000 block
-	addr6 = strtol(pEnd, &pEnd,16); // 0000 block
-	addr7 = strtol(pEnd, &pEnd,16); // 0000 block
-	addr8 = strtol(pEnd, &pEnd,16); // 0000 block
-
-	// create ipv6 address with 16 bit words
-	uip_ip6addr(address,addr1, addr2, addr3, addr4, addr5, addr6, addr7, addr8); // 0001 block
-}
 
 
-int get_bool_value_obix(char* obix_object){
-	PRINTF("Obix object is: %s\n", obix_object);
-	// value can either be true or false
-	if(strstr(obix_object, "true") != NULL){
-		PRINTF("obix value is true\n");
-		return 1;
-	}
-	PRINTF("obix value is false\n");
-	return 0;
-}
 
-void send_message(const char* message, const uint16_t size_msg, void *request,
-		void *response, uint8_t *buffer, uint16_t preferred_size,
-		int32_t *offset) {
-	PRINTF("Send Message: Size = %u, Offset = %ld\n", size_msg, *offset);
-	PRINTF("Preferred Size: %d\n", preferred_size);
 
-	uint16_t length;
-	char *err_msg;
 
-	length = size_msg - *offset;
 
-	printf("length is: %d\n", length);
-
-	if (length <= 0) {
-		PRINTF("AHOYHOY?!\n");
-		REST.set_response_status(response, REST.status.INTERNAL_SERVER_ERROR);
-		err_msg = "calculation of message length error";
-		REST.set_response_payload(response, err_msg, strlen(err_msg));
-		return;
-	}
-
-	if (preferred_size < 0 || preferred_size > REST_MAX_CHUNK_SIZE) {
-		preferred_size = REST_MAX_CHUNK_SIZE;
-		PRINTF(
-				"Preferred size set to REST_MAX_CHUNK_SIZE = %d\n", preferred_size);
-	}
-
-	if (length > preferred_size) {
-		PRINTF("Message still larger then preferred_size, truncating...\n");
-		length = preferred_size;
-		PRINTF("Length is now %u\n", length);
-
-		memcpy(buffer, message + *offset, length);
-
-		/* Truncate if above CHUNKS_TOTAL bytes. */
-		if (*offset + length > CHUNKS_TOTAL) {
-			PRINTF("Reached CHUNKS_TOTAL, truncating...\n");
-			length = CHUNKS_TOTAL - *offset;
-			PRINTF("Length is now %u\n", length);
-			PRINTF("End of resource, setting offset to -1\n");
-			*offset = -1;
-		} else {
-			/* IMPORTANT for chunk-wise resources: Signal chunk awareness to REST engine. */
-			*offset += length;
-			PRINTF("Offset refreshed to %ld\n", *offset);
-		}
-	} else {
-		memcpy(buffer, message + *offset, length);
-		*offset = -1;
-	}
-
-	PRINTF(
-			"Sending response chunk: length = %u, offset = %ld\n", length, *offset);
-
-	REST.set_header_etag(response, (uint8_t *) &length, 1);
-	REST.set_response_payload(response, buffer, length);
-}
-
-#if GROUP_COMM_ENABLED
-coap_packet_t request;
-
-static int msgid = 0;
-
-void send_coap_multicast(char* payload, size_t msgSize, uip_ip6addr_t* mc_address){
-	 coap_init_message(&request, COAP_TYPE_NON, COAP_PUT, msgid++ );
-	 coap_set_payload(&request, (uint8_t *)payload, msgSize);
-	 coap_set_header_uri_path(&request, "");
-	 coap_simple_request(mc_address, 5683, &request);
-	 printf("\n--Done--\n");
-}
-
-void send_group_update(char* payload, size_t msgSize, gc_handler handler ){
-	PRINTF("sending group update\n");
-	int i,l=0;
-	uip_ip6addr_t gc_address;
-
-	for(i = 0; i < MAX_GC_GROUPS; i++){
-		// adding gc handler
-		for(l=0; l < MAX_GC_HANDLERS; l++){
-			if(gc_handlers[i].handlers[l] == handler ){
-				printf("Sending update to group identifier %d", gc_handlers[i].group_identifier);
-				uip_ip6addr(&gc_address, 0xff15, 0, 0, 0, 0, 0, 0, gc_handlers[i].group_identifier);
-				send_coap_multicast(payload, msgSize, &gc_address);
-			}
-		}
-
-	}
-}
-
-void extract_group_identifier(uip_ip6addr_t* ipv6Address, uint16_t* groupIdentifier ){
-	*groupIdentifier = 0;
-	*groupIdentifier =  ((uint8_t *)ipv6Address)[14];
-	*groupIdentifier <<= 8;
-	*groupIdentifier += ((uint8_t *)ipv6Address)[15];
-}
-
-void join_group(int groupIdentifier, gc_handler handler  ){
-	int i,l=0;
-	// use last 32 bits
-	for(i = 0; i < MAX_GC_GROUPS; i++){
-		if(gc_handlers[i].group_identifier == 0 || gc_handlers[i].group_identifier == groupIdentifier){ // free slot or same slot
-
-			gc_handlers[i].group_identifier = groupIdentifier;
-			//gc_handlers[i].group_identifier &= (groupAddress.u16[6] << 16);
-			printf("Assigned slot: %d\n", gc_handlers[i].group_identifier);
-
-			// adding gc handler
-			for(l=0; l < MAX_GC_HANDLERS; l++){
-				if(gc_handlers[i].handlers[l] == NULL ||  gc_handlers[i].handlers[l] == &handler ){
-					gc_handlers[i].handlers[l] = handler;
-					PRINTF("(Re-)Assigned callback on slot %d\n", l);
-					break;
-				}
-			}
-			break;
-		}
-	}
-}
-
-void leave_group(int groupIdentifier, gc_handler handler){
-	int i,l=0;
-	for(i = 0; i < MAX_GC_GROUPS; i++){
-		if(gc_handlers[i].group_identifier == groupIdentifier){ // free slot or same slot
-
-			gc_handlers[i].group_identifier = groupIdentifier;
-			//gc_handlers[i].group_identifier &= (groupAddress.u16[6] << 16);
-			PRINTF("Found slot: %d\n", gc_handlers[i].group_identifier);
-
-			// adding gc handler
-			for(l=0; l < MAX_GC_HANDLERS; l++){
-
-				if(gc_handlers[i].handlers[l] == handler ){
-					gc_handlers[i].handlers[l] = NULL;
-					PRINTF("Removed callback from slot %d\n", l);
-					break;
-				}
-			}
-			break;
-		}
-	}
-}
-#endif // GROUP_COMM_ENABLED
 
 #if RES_TEMP
 int temp_to_buff(char* buffer) {
@@ -396,8 +203,45 @@ int temp_to_default_buff() {
 	return temp_to_buff(tempstring);
 }
 
+const char *TERMINATOR_STRING = "\" ";
+
+//returns a pointer to the end of the concatenated string
+char* fast_strcat(char *dest, char *src){
+
+	while (*dest) dest++;		//skip to \0
+	while (*dest++ = *src++);	//copy until \0
+	return --dest;				//return pointer to \0
+}
+
+uint8_t create_response_datapoint(char *buffer, char *typ, char *href, char *unit, char* value){
+
+	buffer[0]='\0';		//init empty string
+	char *offset =buffer;
+
+	offset = fast_strcat(offset, "<");
+	offset = fast_strcat(offset, typ);
+	offset = fast_strcat(offset, " href=\"");
+	offset = fast_strcat(offset, href);
+	offset = fast_strcat(offset, TERMINATOR_STRING);
+	if(unit != NULL){
+		offset = fast_strcat(offset, "units=\"");
+		offset = fast_strcat(offset, unit);
+		offset = fast_strcat(offset, TERMINATOR_STRING);
+	}
+	offset = fast_strcat(offset, "val=\"");
+	offset = fast_strcat(offset, value);
+	offset = fast_strcat(offset, TERMINATOR_STRING);
+	offset = fast_strcat(offset, "/>");
+
+	return (uint8_t)(offset-buffer);
+}
+
+
+
 uint8_t create_response_datapoint_temperature(char *buffer,	int asChild) {
-	size_t size_temp;
+	temp_to_default_buff();
+	return create_response_datapoint(buffer, "real", "temp/value", "obix:units/celsius", tempstring);
+	/*size_t size_temp;
 	int size_msgp1, size_msgp2;
 	const char *msgp1, *msgp2;
 	uint8_t size_msg;
@@ -430,29 +274,23 @@ uint8_t create_response_datapoint_temperature(char *buffer,	int asChild) {
 	memcpy(buffer + size_msgp1, tempstring, size_temp);
 	memcpy(buffer + size_msgp1 + size_temp, msgp2, size_msgp2);
 
-	return size_msg;
+	return size_msg;*/
 }
 
 uint8_t create_response_object_temperature(char *buffer) {
-	size_t size_datapoint;
-	int size_msgp1, size_msgp2;
-	const char *msgp1, *msgp2;
-	uint8_t size_msg;
+	buffer[0]='\0';		//init empty string
+	char *offset =buffer;
 
-	msgp1 = "<obj href=\"temp\" is=\"iot:TemperatureSensor\">";
-	msgp2 = "</obj>\0";
-	size_msgp1 = 44;
-	size_msgp2 = 7;
+	offset = fast_strcat(offset, "<obj href=\"temp\" is=\"iot:TemperatureSensor\">");
 
-	memcpy(buffer, msgp1, size_msgp1);
 	// creates real data point and copies content to message buffer
-	size_datapoint = create_response_datapoint_temperature(buffer + size_msgp1, 1);
+	offset += create_response_datapoint_temperature(offset, 1);
 
-	memcpy(buffer + size_msgp1 + size_datapoint, msgp2, size_msgp2);
 
-	size_msg = size_msgp1 + size_msgp2 + size_datapoint;
+	offset = fast_strcat(offset, "</obj>\0");
 
-	return size_msg;
+	PRINTF("temp object %s",buffer);
+	return (uint8_t)(offset-buffer);
 }
 
 /*
@@ -465,41 +303,12 @@ void temp_handler(void* request, void* response, uint8_t *buffer,
 	PRINTF(
 			"temp_handler called - preferred size: %u, offset:%ld,\n", preferred_size, *offset);
 	/* Save the message as static variable, so it is retained through multiple calls (chunked resource) */
-	static char message[TEMP_MSG_MAX_SIZE];
-	static uint8_t size_msg;
+	//char message[TEMP_MSG_MAX_SIZE];
+	static uint8_t size_msg=0;
 
-	const uint16_t *accept = NULL;
-	int num = 0;
-	char *err_msg;
+	size_msg = create_response_object_temperature(message);
 
-	/* Check the offset for boundaries of t        he resource data. */
-	if (*offset >= CHUNKS_TOTAL) {
-		REST.set_response_status(response, REST.status.BAD_OPTION);
-		/* A block error message should not exceed the minimum block size (16). */
-		err_msg = "BlockOutOfScope";
-		REST.set_response_payload(response, err_msg, strlen(err_msg));
-		return;
-	}
-
-	/* compute message once */
-	if (*offset <= 0) {
-		/* decide upon content-format */
-		num = REST.get_header_accept(request, &accept);
-
-		REST.set_header_content_type(response, REST.type.APPLICATION_XML);
-
-		if ((size_msg = create_response_object_temperature(message)) <= 0) {
-			PRINTF("ERROR while creating message!\n");
-			REST.set_response_status(response,
-					REST.status.INTERNAL_SERVER_ERROR);
-			err_msg = "ERROR while creating message :\\";
-			REST.set_response_payload(response, err_msg, strlen(err_msg));
-			return;
-		}
-	}
-
-	send_message(message, size_msg, request, response, buffer, preferred_size,
-			offset);
+	iotsys_send(request, response, buffer, preferred_size, offset, message, size_msg);
 }
 
 #if GROUP_COMM_ENABLED
@@ -528,70 +337,17 @@ void value_handler(void* request, void* response, uint8_t *buffer,
 			"temp_value_handler called - preferred size: %u, offset:%ld,\n", preferred_size, *offset);
 	printf("temp value handler.\n");
 	/* Save the message as static variable, so it is retained through multiple calls (chunked resource) */
-    char message[TEMP_MSG_MAX_SIZE];
+    //char message[TEMP_MSG_MAX_SIZE];
 	uint8_t size_msg;
 
-	const uint16_t *accept = NULL;
-	char *err_msg;
+	char * payload_buffer = iotsys_process_request(request,temp_group_commhandler);
 
-#if GROUP_COMM_ENABLED
-	const uint8_t *incoming = NULL;
-	static size_t payload_len = 0;
-	int newVal = 0;
-	uip_ip6addr_t groupAddress;
-	gc_handler handler = &temp_group_commhandler;
-
-	int16_t groupIdentifier = 0;
-
-	const char *uri_path = NULL;
-	int len = REST.get_url(request, &uri_path);
-
-	// for PUT and POST request we need to process the payload content
-	if( REST.get_method_type(request) == METHOD_POST){
-		payload_len = REST.get_request_payload(request, &incoming);
-		memcpy(payload_buffer, incoming, payload_len);
-	}
-
-	if(strstr(uri_path, "joinGroup") && REST.get_method_type(request) == METHOD_POST ){
-		printf("Join group temp called.\n");
-		get_ipv6_multicast_addr(payload_buffer, &groupAddress);
-		PRINT6ADDR(&groupAddress);
-		extract_group_identifier(&groupAddress, &groupIdentifier);
-		PRINTF("\n group identifier: %d\n", groupIdentifier);
-		join_group(groupIdentifier, handler);
-	}
-	else if(strstr(uri_path, "leaveGroup") && REST.get_method_type(request) == METHOD_POST){
-		PRINTF("Leave group called.\n");
-		get_ipv6_multicast_addr(payload_buffer, &groupAddress);
-		PRINT6ADDR(&groupAddress);
-		extract_group_identifier(&groupAddress, &groupIdentifier);
-		PRINTF("\n group identifier: %d\n", groupIdentifier);
-		leave_group(groupIdentifier,  handler);
-	}
-#endif // GROUP_COMM_ENABLED
-
-	/* Check the offset for boundaries of t        he resource data. */
-	if (*offset >= CHUNKS_TOTAL) {
-		REST.set_response_status(response, REST.status.BAD_OPTION);
-		/* A block error message should not exceed the minimum block size (16). */
-		err_msg = "BlockOutOfScope";
-		REST.set_response_payload(response, err_msg, strlen(err_msg));
-		return;
-	}
 
 	REST.set_header_content_type(response, REST.type.APPLICATION_XML);
 
-	if ((size_msg = create_response_datapoint_temperature(message, 0)) <= 0) {
-		PRINTF("ERROR while creating message!\n");
-		REST.set_response_status(response,
-				REST.status.INTERNAL_SERVER_ERROR);
-		err_msg = "ERROR while creating message :\\";
-		REST.set_response_payload(response, err_msg, strlen(err_msg));
-		return;
-	}
+	size_msg = create_response_datapoint_temperature(message, 0);
 
-	send_message(message, size_msg, request, response, buffer, preferred_size,
-			offset);
+	iotsys_send(request, response, buffer, preferred_size, offset, message, size_msg);
 #if GROUP_COMM_ENABLED
 	// check for registered group communication variables
 	send_group_update(buffer, size_msg, &temp_group_commhandler);
@@ -695,7 +451,7 @@ uint8_t create_response_object_button(char *buffer) {
 	const char *msgp1, *msgp2;
 	uint8_t size_msg;
 
-	msgp1 = "<obj href=\"button\" is=\"iot:PushButton\">";
+	msgp1 ="<obj href=\"button\" is=\"iot:PushButton\">";
 	msgp2 = "</obj>\0";
 	size_msgp1 = 39;
 	size_msgp2 = 7;
@@ -730,37 +486,14 @@ void button_handler(void* request, void* response, uint8_t *buffer,
 	PRINTF(
 			"button_handler called - preferred size: %u, offset:%ld,\n", preferred_size, *offset);
 	/* Save the message as static variable, so it is retained through multiple calls (chunked resource) */
-	static char message[BUTTON_MSG_MAX_SIZE];
-	static uint8_t size_msg;
-
-	const uint16_t *accept = NULL;
-	int num = 0;
-	char *err_msg;
-
-
-	/* Check the offset for boundaries of the resource data. */
-	if (*offset >= CHUNKS_TOTAL) {
-		REST.set_response_status(response, REST.status.BAD_OPTION);
-		/* A block error message should not exceed the minimum block size (16). */
-		err_msg = "BlockOutOfScope";
-		REST.set_response_payload(response, err_msg, strlen(err_msg));
-		return;
-	}
+	//char message[BUTTON_MSG_MAX_SIZE];
+	uint8_t size_msg;
 
 	REST.set_header_content_type(response, REST.type.APPLICATION_XML);
 
-	if ((size_msg = create_response_object_button(message))
-			<= 0) {
-		PRINTF("ERROR while creating message!\n");
-		REST.set_response_status(response,
-				REST.status.INTERNAL_SERVER_ERROR);
-		err_msg = "ERROR while creating message :\\";
-		REST.set_response_payload(response, err_msg, strlen(err_msg));
-		return;
-	}
+	size_msg = create_response_object_button(message);
 
-	send_message(message, size_msg, request, response, buffer, preferred_size,
-			offset);
+	iotsys_send(request, response, buffer, preferred_size, offset, message, size_msg);
 }
 
 /*
@@ -774,78 +507,21 @@ void button_value_handler(void* request, void* response, uint8_t *buffer,
 		uint16_t preferred_size, int32_t *offset) {
 	PRINTF("button_value_handler called - preferred size: %u, offset:%ld,\n", preferred_size, *offset);
 	/* Save the message as static variable, so it is retained through multiple calls (chunked resource) */
-	static char message[BUTTON_MSG_MAX_SIZE];
-	static uint8_t size_msg;
+	//char message[BUTTON_MSG_MAX_SIZE];
+	uint8_t size_msg;
 
-	char *err_msg;
+	char * payload_buffer = iotsys_process_request(request,button_group_commhandler);
 
-#if GROUP_COMM_ENABLED
-	const uint8_t *incoming = NULL;
-	static size_t payload_len = 0;
-	int newVal = 0;
-	uip_ip6addr_t groupAddress;
-	gc_handler handler = &button_group_commhandler;
-
-	int16_t groupIdentifier = 0;
-
-	const char *uri_path = NULL;
-	int len = REST.get_url(request, &uri_path);
-
-	// for PUT and POST request we need to process the payload content
-	if( REST.get_method_type(request) == METHOD_POST){
-		payload_len = REST.get_request_payload(request, &incoming);
-		memcpy(payload_buffer, incoming, payload_len);
-	}
-
-	if(strstr(uri_path, "joinGroup") && REST.get_method_type(request) == METHOD_POST ){
-		printf("Join group called.\n");
-		get_ipv6_multicast_addr(payload_buffer, &groupAddress);
-		PRINT6ADDR(&groupAddress);
-		extract_group_identifier(&groupAddress, &groupIdentifier);
-		PRINTF("\n group identifier: %d\n", groupIdentifier);
-		join_group(groupIdentifier, handler);
-	}
-	else if(strstr(uri_path, "leaveGroup") && REST.get_method_type(request) == METHOD_POST){
-		PRINTF("Leave group called.\n");
-		get_ipv6_multicast_addr(payload_buffer, &groupAddress);
-		PRINT6ADDR(&groupAddress);
-		extract_group_identifier(&groupAddress, &groupIdentifier);
-		PRINTF("\n group identifier: %d\n", groupIdentifier);
-		leave_group(groupIdentifier,  handler);
-	}
-#endif // GROUP_COMM_ENABLED
-
-	/* Check the offset for boundaries of t        he resource data. */
-	if (*offset >= CHUNKS_TOTAL) {
-		REST.set_response_status(response, REST.status.BAD_OPTION);
-		/* A block error message should not exceed the minimum block size (16). */
-		err_msg = "BlockOutOfScope";
-		REST.set_response_payload(response, err_msg, strlen(err_msg));
-		return;
-	}
-
-	/* compute message once */
-	if (*offset <= 0) {
-		REST.set_header_content_type(response, REST.type.APPLICATION_XML);
-
-		if ((size_msg = create_response_datapoint_button( message, 0)) <= 0) {
-			PRINTF("ERROR while creating message!\n");
-			REST.set_response_status(response,
-					REST.status.INTERNAL_SERVER_ERROR);
-			err_msg = "ERROR while creating message :\\";
-			REST.set_response_payload(response, err_msg, strlen(err_msg));
-			return;
-		}
-	}
+	size_msg = create_response_datapoint_button( message, 0);
 
 
-	send_message(message, size_msg, request, response, buffer, preferred_size,
-			offset);
+	iotsys_send(request, response, buffer, preferred_size, offset, message, size_msg);
 }
 
 /* Additionally, a handler function named [resource name]_event_handler must be implemented for each PERIODIC_RESOURCE defined.
  * It will be called by the REST manager process with the defined period. */
 void button_value_event_handler(resource_t *r) {
+	PRINTF("button_value_event_handler called");
 	static char buffer[BUTTON_MSG_MAX_SIZE];
 	size_t size_msg;
 	static uint8_t button_presses = 0;
@@ -1034,42 +710,14 @@ void acc_handler(void* request, void* response, uint8_t *buffer,
 	PRINTF(
 			"acc_handler called - preferred size: %u, offset:%ld,\n", preferred_size, *offset);
 	/* Save the message as static variable, so it is retained through multiple calls (chunked resource) */
-	static char message[BUTTON_MSG_MAX_SIZE];
-	static uint8_t size_msg;
+	//char message[BUTTON_MSG_MAX_SIZE];
+	uint8_t size_msg;
 
-	const uint16_t *accept = NULL;
-	int num = 0;
-	char *err_msg;
+	REST.set_header_content_type(response, REST.type.APPLICATION_XML);
 
-	/* Check the offset for boundaries of t        he resource data. */
-	if (*offset >= CHUNKS_TOTAL) {
-		REST.set_response_status(response, REST.status.BAD_OPTION);
-		/* A block error message should not exceed the minimum block size (16). */
-		err_msg = "BlockOutOfScope";
-		REST.set_response_payload(response, err_msg, strlen(err_msg));
-		return;
-	}
+	size_msg = create_response_object_acc(message);
 
-	/* compute message once */
-	if (*offset <= 0) {
-		/* decide upon content-format */
-		num = REST.get_header_accept(request, &accept);
-
-		REST.set_header_content_type(response, REST.type.APPLICATION_XML);
-
-		if ((size_msg = create_response_object_acc(message))
-				<= 0) {
-			PRINTF("ERROR while creating message!\n");
-			REST.set_response_status(response,
-					REST.status.INTERNAL_SERVER_ERROR);
-			err_msg = "ERROR while creating message :\\";
-			REST.set_response_payload(response, err_msg, strlen(err_msg));
-			return;
-		}
-	}
-
-	send_message(message, size_msg, request, response, buffer, preferred_size,
-			offset);
+	iotsys_send(request, response, buffer, preferred_size, offset, message, size_msg);
 }
 
 #if RES_ACC_ACTIVE
@@ -1084,34 +732,14 @@ void event_acc_active_handler(void* request, void* response, uint8_t *buffer,
 	PRINTF(
 			"event_acc_handler called - preferred size: %u, offset:%ld,\n", preferred_size, *offset);
 	/* Save the message as static variable, so it is retained through multiple calls (chunked resource) */
-	static char message[ACC_MSG_MAX_SIZE];
-	static uint8_t size_msg;
-
-	char *err_msg;
-
-	/* Check the offset for boundaries of t        he resource data. */
-	if (*offset >= CHUNKS_TOTAL) {
-		REST.set_response_status(response, REST.status.BAD_OPTION);
-		/* A block error message should not exceed the minimum block size (16). */
-		err_msg = "BlockOutOfScope";
-		REST.set_response_payload(response, err_msg, strlen(err_msg));
-		return;
-	}
+	//char message[ACC_MSG_MAX_SIZE];
+	uint8_t size_msg;
 
 	/* decide upon content-format */
 	REST.set_header_content_type(response, REST.type.APPLICATION_XML);
 
-	if ((size_msg = create_response_datapoint_acc(message, 0,0)) <= 0) {
-		PRINTF("ERROR while creating message!\n");
-		REST.set_response_status(response,
-				REST.status.INTERNAL_SERVER_ERROR);
-		err_msg = "ERROR while creating message :\\";
-		REST.set_response_payload(response, err_msg, strlen(err_msg));
-		return;
-	}
-
-	send_message(message, size_msg, request, response, buffer, preferred_size,
-			offset);
+	size_msg = create_response_datapoint_acc(message, 0,0);
+	iotsys_send(request, response, buffer, preferred_size, offset, message, size_msg);
 }
 
 /* Additionally, a handler function named [resource name]_event_handler must be implemented for each PERIODIC_RESOURCE defined.
@@ -1168,78 +796,19 @@ void event_acc_freefall_handler(void* request, void* response, uint8_t *buffer,
 	PRINTF(
 			"event_acc_handler called - preferred size: %u, offset:%ld,\n", preferred_size, *offset);
 	/* Save the message as static variable, so it is retained through multiple calls (chunked resource) */
-	static char message[ACC_MSG_MAX_SIZE];
-	static uint8_t size_msg;
+	//char message[ACC_MSG_MAX_SIZE];
+	uint8_t size_msg;
 
-	char *err_msg;
-
-#if GROUP_COMM_ENABLED
-
-	int newVal = 0;
-	const uint8_t *incoming = NULL;
-	static size_t payload_len = 0;
-	uip_ip6addr_t groupAddress;
-	gc_handler leb_blue_handler = &acc_freefall_groupCommHandler;
-
-	int16_t groupIdentifier = 0;
-
-	const char *uri_path = NULL;
-	int len = REST.get_url(request, &uri_path);
-
-	// for PUT and POST request we need to process the payload content
-	if( REST.get_method_type(request) == METHOD_PUT || REST.get_method_type(request) == METHOD_POST){
-		payload_len = REST.get_request_payload(request, &incoming);
-		memcpy(payload_buffer, incoming, payload_len);
-	}
-
-    if(strstr(uri_path, "joinGroup") && REST.get_method_type(request) == METHOD_POST ){
-    	printf("#### Join Group Called!");
-    	PRINTF("Join group called.\n");
-    	get_ipv6_multicast_addr(payload_buffer, &groupAddress);
-
-    	// join locally for the multicast address
-    	uip_ds6_maddr_add(&groupAddress);
-
-    	PRINT6ADDR(&groupAddress);
-    	extract_group_identifier(&groupAddress, &groupIdentifier);
-    	PRINTF("\n group identifier: %d\n", groupIdentifier);
-    	join_group(groupIdentifier, leb_blue_handler);
+	char * payload_buffer = iotsys_process_request(request,acc_freefall_groupCommHandler);
 
 
-    }
-    else if(strstr(uri_path, "leaveGroup") && REST.get_method_type(request) == METHOD_POST){
-    	PRINTF("Leave group called.\n");
-    	get_ipv6_multicast_addr(payload_buffer, &groupAddress);
-    	PRINT6ADDR(&groupAddress);
-    	extract_group_identifier(&groupAddress, &groupIdentifier);
-    	PRINTF("\n group identifier: %d\n", groupIdentifier);
-    	leave_group(groupIdentifier,  leb_blue_handler);
-    }
-#endif
-
-	/* Check the offset for boundaries of t        he resource data. */
-	if (*offset >= CHUNKS_TOTAL) {
-		REST.set_response_status(response, REST.status.BAD_OPTION);
-		/* A block error message should not exceed the minimum block size (16). */
-		err_msg = "BlockOutOfScope";
-		REST.set_response_payload(response, err_msg, strlen(err_msg));
-		return;
-	}
 
 	/* decide upon content-format */
 	REST.set_header_content_type(response, REST.type.APPLICATION_XML);
 
-	if ((size_msg = create_response_datapoint_acc(message, 0,1)) <= 0) {
-		PRINTF("ERROR while creating message!\n");
-		REST.set_response_status(response,
-				REST.status.INTERNAL_SERVER_ERROR);
-		err_msg = "ERROR while creating message :\\";
-		REST.set_response_payload(response, err_msg, strlen(err_msg));
-		return;
-	}
+	size_msg = create_response_datapoint_acc(message, 0,1);
 
-	send_message(message, size_msg, request, response, buffer, preferred_size,
-			offset);
+	iotsys_send(request, response, buffer, preferred_size, offset, message, size_msg);
 }
 
 /* Additionally, a handler function named [resource name]_event_handler must be implemented for each PERIODIC_RESOURCE defined.
@@ -1247,7 +816,7 @@ void event_acc_freefall_handler(void* request, void* response, uint8_t *buffer,
 void event_acc_freefall_event_handler(resource_t *r) {
 	static char buffer[ACC_MSG_MAX_SIZE];
 	size_t size_msg;
-	static uint8_t acc_events = 0;
+	uint8_t acc_events = 0;
 
 	if (acc_register_acc & ADXL345_INT_INACTIVITY) {
 		acc = ACC_INACTIVITY;
@@ -1405,37 +974,16 @@ leds_handler(void* request, void* response, uint8_t *buffer, uint16_t preferred_
 	PRINTF(
 			"leds handler called - preferred size: %u, offset:%ld,\n", preferred_size, *offset);
 
-	char message[LED_MSG_MAX_SIZE];
+	//char message[LED_MSG_MAX_SIZE];
 	uint8_t size_msg;
 
-	//const uint16_t *accept = NULL;
-	int num = 0;
-	char *err_msg;
-
-	/* Check the offset for boundaries of t        he resource data. */
-	if (*offset >= CHUNKS_TOTAL) {
-		REST.set_response_status(response, REST.status.BAD_OPTION);
-		/* A block error message should not exceed the minimum block size (16). */
-		err_msg = "BlockOutOfScope";
-		REST.set_response_payload(response, err_msg, strlen(err_msg));
-		return;
-	}
+	char * payload_buffer = iotsys_process_request(request,NULL);
 
 	// due to memory constraints --> compute message for all requests
 	REST.set_header_content_type(response, REST.type.APPLICATION_XML);
 
-	if ((size_msg = create_response_object_led(message))
-			<= 0) {
-		PRINTF("ERROR while creating message!\n");
-		REST.set_response_status(response,
-				REST.status.INTERNAL_SERVER_ERROR);
-		err_msg = "ERROR while creating message :\\";
-		REST.set_response_payload(response, err_msg, strlen(err_msg));
-		return;
-	}
-
-	send_message(message, size_msg, request, response, buffer, preferred_size,
-			offset);
+	size_msg = create_response_object_led(message);
+	iotsys_send(request, response, buffer, preferred_size, offset, message, size_msg);
 }
 
 /*
@@ -1449,18 +997,14 @@ void led_red_handler(void* request, void* response, uint8_t *buffer,
 	PRINTF(
 			"led_red_handler called - preferred size: %u, offset:%ld,\n", preferred_size, *offset);
 	// Save the message as static variable, so it is retained through multiple calls (chunked resource)
-	char message[BUTTON_MSG_MAX_SIZE];
+	//char message[BUTTON_MSG_MAX_SIZE];
 	uint8_t size_msg;
 
-	char *err_msg;
-
-	int payload_len = 0;
 	int newVal = 0;
-	const uint8_t *incoming;
+
+	char * payload_buffer = iotsys_process_request(request,NULL);
 
 	if( REST.get_method_type(request) == METHOD_PUT){
-		payload_len = REST.get_request_payload(request, &incoming);
-		memcpy(payload_buffer, incoming, payload_len);
 		newVal = get_bool_value_obix(payload_buffer);
 		if(newVal){
 			leds_on(LEDS_RED);
@@ -1470,31 +1014,9 @@ void led_red_handler(void* request, void* response, uint8_t *buffer,
 		}
 	}
 
-	// Check the offset for boundaries of the resource data.
-	if (*offset >= CHUNKS_TOTAL) {
-		REST.set_response_status(response, REST.status.BAD_OPTION);
-		// A block error message should not exceed the minimum block size (16).
-		err_msg = "BlockOutOfScope";
-		REST.set_response_payload(response, err_msg, strlen(err_msg));
-		return;
-	}
+	size_msg = create_response_datapoint_led(message, 0, 0);
 
-	// compute message once
-	if (*offset <= 0) {
-		REST.set_header_content_type(response, REST.type.APPLICATION_XML);
-
-		if ((size_msg = create_response_datapoint_led(message, 0, 0)) <= 0) {
-			PRINTF("ERROR while creating message!\n");
-			REST.set_response_status(response,
-					REST.status.INTERNAL_SERVER_ERROR);
-			err_msg = "ERROR while creating message :\\";
-			REST.set_response_payload(response, err_msg, strlen(err_msg));
-			return;
-		}
-	}
-
-	send_message(message, size_msg, request, response, buffer, preferred_size,
-			offset);
+	iotsys_send(request, response, buffer, preferred_size, offset,message,size_msg);
 }
 
 /*
@@ -1508,18 +1030,14 @@ void led_green_handler(void* request, void* response, uint8_t *buffer,
 	PRINTF(
 			"led_green_handler called - preferred size: %u, offset:%ld,\n", preferred_size, *offset);
 	// Save the message as static variable, so it is retained through multiple calls (chunked resource)
-	char message[BUTTON_MSG_MAX_SIZE];
+	//char message[BUTTON_MSG_MAX_SIZE];
 	uint8_t size_msg;
 
-	char *err_msg;
-	const uint8_t *incoming = NULL;
-
-	int payload_len = 0;
 	int newVal = 0;
 
+	char * payload_buffer = iotsys_process_request(request,NULL);
+
 	if( REST.get_method_type(request) == METHOD_PUT){
-		payload_len = REST.get_request_payload(request, &incoming);
-		memcpy(payload_buffer, incoming, payload_len);
 		newVal = get_bool_value_obix(payload_buffer);
 		if(newVal){
 			leds_on(LEDS_GREEN);
@@ -1529,31 +1047,9 @@ void led_green_handler(void* request, void* response, uint8_t *buffer,
 		}
 	}
 
-	// Check the offset for boundaries of the resource data.
-	if (*offset >= CHUNKS_TOTAL) {
-		REST.set_response_status(response, REST.status.BAD_OPTION);
-		// A block error message should not exceed the minimum block size (16).
-		err_msg = "BlockOutOfScope";
-		REST.set_response_payload(response, err_msg, strlen(err_msg));
-		return;
-	}
+	size_msg = create_response_datapoint_led(message, 0, 2);
 
-	// compute message once
-	if (*offset <= 0) {
-		REST.set_header_content_type(response, REST.type.APPLICATION_XML);
-
-		if ((size_msg = create_response_datapoint_led(message, 0, 2)) <= 0) {
-			PRINTF("ERROR while creating message!\n");
-			REST.set_response_status(response,
-					REST.status.INTERNAL_SERVER_ERROR);
-			err_msg = "ERROR while creating message :\\";
-			REST.set_response_payload(response, err_msg, strlen(err_msg));
-			return;
-		}
-	}
-
-	send_message(message, size_msg, request, response, buffer, preferred_size,
-			offset);
+	iotsys_send(request, response, buffer, preferred_size, offset, message, size_msg);
 }
 
 
@@ -1584,53 +1080,11 @@ void led_blue_handler(void* request, void* response, uint8_t *buffer,
 	PRINTF(
 			"led_blue_handler called - preferred size: %u, offset:%ld,\n", preferred_size, *offset);
 	// Save the message as static variable, so it is retained through multiple calls (chunked resource)
-	static char message[BUTTON_MSG_MAX_SIZE];
-	static uint8_t size_msg;
+	//char message[BUTTON_MSG_MAX_SIZE];
+	uint8_t size_msg;
 	int newVal = 0;
-	const uint8_t *incoming = NULL;
-	static size_t payload_len = 0;
 
-	const char *uri_path = NULL;
-	int len = REST.get_url(request, &uri_path);
-
-	// for PUT and POST request we need to process the payload content
-	if( REST.get_method_type(request) == METHOD_PUT || REST.get_method_type(request) == METHOD_POST){
-		payload_len = REST.get_request_payload(request, &incoming);
-		memcpy(payload_buffer, incoming, payload_len);
-	}
-
-#if GROUP_COMM_ENABLED
-	uip_ip6addr_t groupAddress;
-	gc_handler leb_blue_handler = &led_blue_groupCommHandler;
-
-	int16_t groupIdentifier = 0;
-
-    if(strstr(uri_path, "joinGroup") && REST.get_method_type(request) == METHOD_POST ){
-    	printf("#### Join Group Called!");
-    	PRINTF("Join group called.\n");
-    	get_ipv6_multicast_addr(payload_buffer, &groupAddress);
-
-    	// join locally for the multicast address
-    	uip_ds6_maddr_add(&groupAddress);
-
-    	PRINT6ADDR(&groupAddress);
-    	extract_group_identifier(&groupAddress, &groupIdentifier);
-    	PRINTF("\n group identifier: %d\n", groupIdentifier);
-    	join_group(groupIdentifier, leb_blue_handler);
-
-
-    }
-    else if(strstr(uri_path, "leaveGroup") && REST.get_method_type(request) == METHOD_POST){
-    	PRINTF("Leave group called.\n");
-    	get_ipv6_multicast_addr(payload_buffer, &groupAddress);
-    	PRINT6ADDR(&groupAddress);
-    	extract_group_identifier(&groupAddress, &groupIdentifier);
-    	PRINTF("\n group identifier: %d\n", groupIdentifier);
-    	leave_group(groupIdentifier,  leb_blue_handler);
-    }
-#endif
-
-	char *err_msg;
+	char * payload_buffer = iotsys_process_request(request,led_blue_groupCommHandler);
 
 	if( REST.get_method_type(request) == METHOD_PUT){
 		newVal = get_bool_value_obix(payload_buffer);
@@ -1641,32 +1095,9 @@ void led_blue_handler(void* request, void* response, uint8_t *buffer,
 			leds_off(LEDS_BLUE);
 		}
 	}
+	size_msg = create_response_datapoint_led(message, 0, 1);
 
-	// Check the offset for boundaries of the resource data.
-	if (*offset >= CHUNKS_TOTAL) {
-		REST.set_response_status(response, REST.status.BAD_OPTION);
-		// A block error message should not exceed the minimum block size (16).
-		err_msg = "BlockOutOfScope";
-		REST.set_response_payload(response, err_msg, strlen(err_msg));
-		return;
-	}
-
-	// compute message once
-	if (*offset <= 0) {
-		REST.set_header_content_type(response, REST.type.APPLICATION_XML);
-
-		if ((size_msg = create_response_datapoint_led(message, 0, 1)) <= 0) {
-			PRINTF("ERROR while creating message!\n");
-			REST.set_response_status(response,
-					REST.status.INTERNAL_SERVER_ERROR);
-			err_msg = "ERROR while creating message :\\";
-			REST.set_response_payload(response, err_msg, strlen(err_msg));
-			return;
-		}
-	}
-
-	send_message(message, size_msg, request, response, buffer, preferred_size,
-			offset);
+	iotsys_send(request, response, buffer, preferred_size, offset,message,size_msg);
 }
 #endif // RES_LEDS
 
