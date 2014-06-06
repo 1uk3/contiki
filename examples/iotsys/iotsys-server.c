@@ -46,10 +46,10 @@
 #include "iotsys.h"
 
 #define RES_TEMP 1
-#define RES_ACC 0
-#define RES_ACC_ACTIVE 0
-#define RES_ACC_FREEFALL 0
-#define RES_BUTTON 0
+#define RES_ACC 1
+#define RES_ACC_ACTIVE 1
+#define RES_ACC_FREEFALL 1
+#define RES_BUTTON 1
 #define RES_LEDS 1
 
 #define GROUP_COMM_ENABLED 1
@@ -161,6 +161,8 @@ int led_green = 0;
 char batterystring[BATTERY_BUFF_MAX];
 #endif
 
+const char * TRUE = "true";
+const char * FALSE = "false";
 
 /******************************************************************************/
 /* helper functions ***********************************************************/
@@ -213,7 +215,7 @@ char* fast_strcat(char *dest, char *src){
 	return --dest;				//return pointer to \0
 }
 
-uint8_t create_response_datapoint(char *buffer, char *typ, char *href, char *unit, char* value){
+uint8_t create_response_datapoint(char *buffer, char *typ, char *parent, char *href, char *unit, char* value, uint8_t asChild){
 
 	buffer[0]='\0';		//init empty string
 	char *offset =buffer;
@@ -221,7 +223,13 @@ uint8_t create_response_datapoint(char *buffer, char *typ, char *href, char *uni
 	offset = fast_strcat(offset, "<");
 	offset = fast_strcat(offset, typ);
 	offset = fast_strcat(offset, " href=\"");
-	offset = fast_strcat(offset, href);
+	if(parent != NULL && asChild){
+		offset = fast_strcat(offset, parent);
+		offset = fast_strcat(offset, "/");
+	}
+	if(href != NULL){
+		offset = fast_strcat(offset, href);
+	}
 	offset = fast_strcat(offset, TERMINATOR_STRING);
 	if(unit != NULL){
 		offset = fast_strcat(offset, "units=\"");
@@ -240,7 +248,7 @@ uint8_t create_response_datapoint(char *buffer, char *typ, char *href, char *uni
 
 uint8_t create_response_datapoint_temperature(char *buffer,	int asChild) {
 	temp_to_default_buff();
-	return create_response_datapoint(buffer, "real", "temp/value", "obix:units/celsius", tempstring);
+	return create_response_datapoint(buffer, "real", "temp","value", "obix:units/celsius", tempstring,1);
 	/*size_t size_temp;
 	int size_msgp1, size_msgp2;
 	const char *msgp1, *msgp2;
@@ -286,10 +294,8 @@ uint8_t create_response_object_temperature(char *buffer) {
 	// creates real data point and copies content to message buffer
 	offset += create_response_datapoint_temperature(offset, 1);
 
-
 	offset = fast_strcat(offset, "</obj>\0");
 
-	PRINTF("temp object %s",buffer);
 	return (uint8_t)(offset-buffer);
 }
 
@@ -355,6 +361,16 @@ void value_handler(void* request, void* response, uint8_t *buffer,
 #endif
 }
 
+void notify_subscribers(resource_t *r, char *buffer, size_t size_msg, uint8_t counter){
+	/* Build notification. */
+	coap_packet_t notification[1]; /* This way the packet can be treated as pointer as usual. */
+	coap_init_message(notification, COAP_TYPE_NON, CONTENT_2_05, 0);
+	coap_set_payload(notification, buffer, size_msg);
+
+	/* Notify the registered observers with the given message type, observe option, and payload. */
+	REST.notify_subscribers(r, counter, notification);
+}
+
 /*
  * Additionally, a handler function named [resource name]_handler must be implemented for each PERIODIC_RESOURCE.
  * It will be called by the REST manager process with the defined period.
@@ -380,13 +396,8 @@ void value_periodic_handler(resource_t *r) {
 		}
 		printf("Notify subscribers\n");
 
-		/* Build notification. */
-		coap_packet_t notification[1]; /* This way the packet can be treated as pointer as usual. */
-		coap_init_message(notification, COAP_TYPE_NON, CONTENT_2_05, 0);
-		coap_set_payload(notification, buffer, size_msg);
+		notify_subscribers(r,buffer,size_msg,obs_counter);
 
-		/* Notify the registered observers with the given message type, observe option, and payload. */
-		REST.notify_subscribers(r, obs_counter, notification);
 		#if GROUP_COMM_ENABLED
 		// check for registered group communication variables
 			send_group_update(buffer, size_msg, &temp_group_commhandler);
@@ -402,69 +413,32 @@ void value_periodic_handler(resource_t *r) {
 #endif // ENABLE TEMP
 
 #if RES_BUTTON
-int button_to_buff(char* buffer) {
+char *button_to_buff() {
 	if (virtual_button) {
-		return snprintf(buffer, BUTTON_BUFF_MAX, "true");
+		return TRUE;
 	}
-	return snprintf(buffer, BUTTON_BUFF_MAX, "false");
+	return FALSE;
 }
 
-int button_to_default_buff() {
-	return button_to_buff(buttonstring);
-}
 
-uint8_t create_response_datapoint_button(char *buffer, int asChild) {
-	size_t size_button;
-	int size_msgp1, size_msgp2;
-	const char *msgp1, *msgp2;
-	uint8_t size_msg;
+uint8_t create_response_datapoint_button(char *buffer) {
 
-	msgp1 = "<bool val=\"";
-	size_msgp1 = 11;
+	return create_response_datapoint(buffer, "bool", "button","value", NULL, button_to_buff(),1);
 
-	if(asChild){
-		msgp2 = "\"/>";
-		size_msgp2 = 3;
-	}
-	else{
-		msgp2 = "\"/>\0";
-		size_msgp2 = 4;
-	}
-
-	if ((size_button = button_to_default_buff()) < 0) {
-		PRINTF("Error preparing button string!\n");
-		return 0;
-	}
-
-	size_msg = size_msgp1 + size_msgp2 + size_button;
-
-	memcpy(buffer, msgp1, size_msgp1);
-	memcpy(buffer + size_msgp1, buttonstring, size_button);
-	memcpy(buffer + size_msgp1 + size_button, msgp2, size_msgp2);
-
-	return size_msg;
 }
 
 uint8_t create_response_object_button(char *buffer) {
-	size_t size_datapoint;
-	int size_msgp1, size_msgp2;
-	const char *msgp1, *msgp2;
-	uint8_t size_msg;
+	buffer[0]='\0';		//init empty string
+	char *offset =buffer;
 
-	msgp1 ="<obj href=\"button\" is=\"iot:PushButton\">";
-	msgp2 = "</obj>\0";
-	size_msgp1 = 39;
-	size_msgp2 = 7;
+	offset = fast_strcat(offset, "<obj href=\"button\" is=\"iot:PushButton\">");
 
-	memcpy(buffer, msgp1, size_msgp1);
-	// creates bool data point and copies content to message buffer
-	size_datapoint = create_response_datapoint_button(buffer + size_msgp1, 1);
+	// creates real data point and copies content to message buffer
+	offset += create_response_datapoint_button(offset);
 
-	memcpy(buffer + size_msgp1 + size_datapoint, msgp2, size_msgp2);
+	offset = fast_strcat(offset, "</obj>\0");
 
-	size_msg = size_msgp1 + size_msgp2 + size_datapoint;
-
-	return size_msg;
+	return (uint8_t)(offset-buffer);
 }
 
 /*
@@ -512,7 +486,7 @@ void button_value_handler(void* request, void* response, uint8_t *buffer,
 
 	char * payload_buffer = iotsys_process_request(request,button_group_commhandler);
 
-	size_msg = create_response_datapoint_button( message, 0);
+	size_msg = create_response_datapoint_button( message);
 
 
 	iotsys_send(request, response, buffer, preferred_size, offset, message, size_msg);
@@ -531,18 +505,12 @@ void button_value_event_handler(resource_t *r) {
 	}
 	virtual_button = !virtual_button;
 
-	if ((size_msg = create_response_datapoint_button( buffer, 0)) <= 0) {
+	if ((size_msg = create_response_datapoint_button( buffer)) <= 0) {
 		PRINTF("ERROR while creating message!\n");
 		return;
 	}
 
-	/* Build notification. */
-	coap_packet_t notification[1]; /* This way the packet can be treated as pointer as usual. */
-	coap_init_message(notification, COAP_TYPE_NON, CONTENT_2_05, 0);
-	coap_set_payload(notification, buffer, size_msg);
-
-	/* Notify the registered observers with the given message type, observe option, and payload. */
-	REST.notify_subscribers(r, button_presses, notification);
+	notify_subscribers(r,buffer,size_msg,button_presses);
 
 #if GROUP_COMM_ENABLED
 	// check for registered group communication variables
@@ -567,80 +535,15 @@ int acc_to_default_buff() {
 }*/
 
 /* Accs */
-uint8_t create_response_datapoint_acc(char *buffer,
-		int asChild, int field) {
-	int size_msgp1, size_msgp2, size_msgp3, size_field;
-	const char *msgp1, *msgp2, *msgp3, *msgp_active, *msgp_freefall, *msgp_green;
-	char *msgp_field; // will point to active, freefall
-	int value = 1; // on or off, depending on state
-	const char *msg_true;
-	const char *msg_false;
-	char *msgp_value;
-	int size_msgp_value = 0;
-
-	msg_true = "true";
-	msg_false = "false";
-
-	msgp_active = "active";
-	msgp_freefall = "freefall";
-
-	uint8_t size_msg;
-
-	PRINTF("Creating response datapoint acc asChild: %d field: %d\n", asChild, field);
-
-	if (asChild) {
-		msgp1 =	"<bool href=\"acc/";
-		size_msgp1 = 17;
-
-	} else {
-		msgp1 = "<bool href=\"";
-		size_msgp1 = 12;
-	}
-	msgp2 = "\" val=\"";
-	size_msgp2 = 7;
-	if(asChild) {
-		msgp3 = "\"/>";
-		size_msgp3 = 3;
-	}
-	else{
-		msgp3 = "\"/>\0";
-		size_msgp3 = 4;
-	}
-
-	memcpy(buffer, msgp1, size_msgp1);
+uint8_t create_response_datapoint_acc(char *buffer, int asChild, int field) {
 
 	if(field == 0){ // active
-		msgp_field = msgp_active;
-		size_field = 6;
-		if(acc == ACC_ACTIVITY){
-			value = 1;
-		}
+		return create_response_datapoint(buffer, "bool", "acc","active", NULL, TRUE, asChild);
 	} else if(field == 1){
-		msgp_field = msgp_freefall;
-		size_field = 8;
-		if(acc == ACC_FREEFALL){
-		  value = 1;
-		}
+		return create_response_datapoint(buffer, "bool", "acc","freefall", NULL, TRUE, asChild);
 	}
 
-	if(value == 1){
-		msgp_value = msg_true;
-		size_msgp_value = 4;
-	}
-	else{
-		msgp_value = msg_false;
-		size_msgp_value = 5;
-	}
-	memcpy(buffer + size_msgp1, msgp_field, size_field);
-	memcpy(buffer + size_msgp1 + size_field, msgp2, size_msgp2);
-
-	memcpy(buffer + size_msgp1 + size_field + size_msgp2, msgp_value, size_msgp_value);
-
-	memcpy(buffer + size_msgp1 + size_field + size_msgp2 + size_msgp_value, msgp3, size_msgp3);
-
-	size_msg = size_msgp1 + size_msgp2 + size_msgp_value + size_field + size_msgp3;
-
-	return size_msg;
+	return create_response_datapoint(buffer, "bool", "acc", NULL, NULL, FALSE, asChild);
 }
 
 /*uint8_t create_response_datapoint_acc(char *buffer, int asChild, int freeFall) {
@@ -677,27 +580,19 @@ uint8_t create_response_datapoint_acc(char *buffer,
 }*/
 
 uint8_t create_response_object_acc(char *buffer) {
-	size_t size_datapoint_activity;
-    size_t size_datapoint_freefall;
-	int size_msgp1, size_msgp2;
-	const char *msgp1, *msgp2;
-	uint8_t size_msg;
 
-	msgp1 = "<obj href=\"acc\" is=\"iot:ActivitySensor\">";
-	msgp2 = "</obj>\0";
-	size_msgp1 = 40;
-	size_msgp2 = 7;
+	buffer[0]='\0';		//init empty string
+	char *offset =buffer;
 
-	memcpy(buffer, msgp1, size_msgp1);
-	// creates data point and copies content to message buffer
-	size_datapoint_activity = create_response_datapoint_acc(buffer + size_msgp1 , 1,0);
-	size_datapoint_freefall = create_response_datapoint_acc(buffer + size_msgp1 + size_datapoint_activity, 1,1);
+	offset = fast_strcat(offset, "<obj href=\"acc\" is=\"iot:ActivitySensor\">");
 
-	memcpy(buffer + size_msgp1 + + size_datapoint_activity + size_datapoint_freefall, msgp2, size_msgp2);
+	// creates real data point and copies content to message buffer
+	offset += create_response_datapoint_acc(offset, 1, 0);
+	offset += create_response_datapoint_acc(offset, 1, 1);
 
-	size_msg = size_msgp1 + size_msgp2 + size_datapoint_activity + size_datapoint_freefall;
+	offset = fast_strcat(offset, "</obj>\0");
 
-	return size_msg;
+	return (uint8_t)(offset-buffer);
 }
 
 /*
@@ -764,13 +659,7 @@ void event_acc_active_event_handler(resource_t *r) {
 		return;
 	}
 
-	/* Build notification. */
-	coap_packet_t notification[1]; /* This way the packet can be treated as pointer as usual. */
-	coap_init_message(notification, COAP_TYPE_NON, CONTENT_2_05, 0);
-	coap_set_payload(notification, buffer, size_msg);
-
-	/* Notify the registered observers with the given message type, observe option, and payload. */
-	REST.notify_subscribers(r, acc_events, notification);
+	notify_subscribers(r,buffer,size_msg,acc_events);
 }
 
 #endif
@@ -833,13 +722,7 @@ void event_acc_freefall_event_handler(resource_t *r) {
 		return;
 	}
 
-	/* Build notification. */
-	coap_packet_t notification[1]; /* This way the packet can be treated as pointer as usual. */
-	coap_init_message(notification, COAP_TYPE_NON, CONTENT_2_05, 0);
-	coap_set_payload(notification, buffer, size_msg);
-
-	/* Notify the registered observers with the given message type, observe option, and payload. */
-	REST.notify_subscribers(r, acc_events, notification);
+	notify_subscribers(r,buffer,size_msg,acc_events);
 
 	#if GROUP_COMM_ENABLED
 		// check for registered group communication variables
@@ -853,117 +736,60 @@ void event_acc_freefall_event_handler(resource_t *r) {
 
 #if RES_LEDS
 /* Leds */
-uint8_t create_response_datapoint_led(char *buffer,
-		int asChild, int color) {
+uint8_t create_response_datapoint_led(char *buffer, int asChild, int color) {
+
+
+
 	int size_msgp1, size_msgp2, size_msgp3, size_color;
 	const char *msgp1, *msgp2, *msgp3, *msgp_red, *msgp_blue, *msgp_green;
 	char *msgp_color; // will point to red, blue or green
-	int value = 0; // on or off, depending on led
-	const char *msg_true;
-	const char *msg_false;
-	char *msgp_value;
-	int size_msgp_value = 0;
 
-	msg_true = "true";
-	msg_false = "false";
+	char *msgp_value = FALSE;
+
 
 	msgp_red = "red";
 	msgp_blue = "blue";
 	msgp_green = "green";
 
-	uint8_t size_msg;
-
-	PRINTF("Creating response datapoint led asChild: %d color: %d\n", asChild, color);
-
-	if (asChild) {
-		msgp1 =	"<bool href=\"leds/";
-		size_msgp1 = 17;
-
-	} else {
-		msgp1 = "<bool href=\"";
-		size_msgp1 = 12;
-	}
-	msgp2 = "\" val=\"";
-	size_msgp2 = 7;
-	if(asChild) {
-		msgp3 = "\"/>";
-		size_msgp3 = 3;
-	}
-	else{
-		msgp3 = "\"/>\0";
-		size_msgp3 = 4;
-	}
-
-	memcpy(buffer, msgp1, size_msgp1);
 
 	if(color == 0){ // red
 		msgp_color = msgp_red;
-		size_color = 3;
+
 		if(led_red == 1){
-			value = 1;
+			msgp_value = TRUE;
 		}
 	} else if(color == 1){
 		msgp_color = msgp_blue;
-		size_color = 4;
+
 		if(led_blue == 1){
-		  value = 1;
+			msgp_value = TRUE;
 		}
 	} else if(color == 2){
 		msgp_color = msgp_green;
-		size_color = 5;
 
 		if(led_green == 1){
-			value = 1;
+			msgp_value = TRUE;
 		}
 	}
 
-	if( value == 1){
-		msgp_value = msg_true;
-		size_msgp_value = 4;
-	}
-	else{
-		msgp_value = msg_false;
-		size_msgp_value = 5;
-	}
-	memcpy(buffer + size_msgp1, msgp_color, size_color);
-	memcpy(buffer + size_msgp1 + size_color, msgp2, size_msgp2);
-
-	memcpy(buffer + size_msgp1 + size_color + size_msgp2, msgp_value, size_msgp_value);
-
-	memcpy(buffer + size_msgp1 + size_color + size_msgp2 + size_msgp_value, msgp3, size_msgp3);
-
-	size_msg = size_msgp1 + size_msgp2 + size_msgp_value + size_color + size_msgp3;
-
-	return size_msg;
+	return create_response_datapoint(buffer, "bool", "leds", msgp_color, NULL, msgp_value, asChild);
 }
 
 uint8_t create_response_object_led(char *buffer) {
-	int size_datapoint_red;
-	int size_datapoint_green;
-	int size_datapoint_blue;
-	int size_msgp1, size_msgp2;
-	const char *msgp1, *msgp2;
-	uint8_t size_msg;
 
-	PRINTF("Creating response object led called\n");
+	buffer[0]='\0';		//init empty string
+	char *offset =buffer;
 
-	msgp1 = "<obj href=\"leds\" is=\"iot:LedsActuator\">";
-	msgp2 = "</obj>\0";
-	size_msgp1 = 39;
-	size_msgp2 = 7;
+	offset = fast_strcat(offset, "<obj href=\"leds\" is=\"iot:LedsActuator\">");
 
-	memcpy(buffer, msgp1, size_msgp1);
-	// creates bool data point and copies content to message buffer
-	size_datapoint_red = create_response_datapoint_led(buffer + size_msgp1, 0, 0);
-	size_datapoint_green = create_response_datapoint_led(buffer + size_msgp1 + size_datapoint_red, 0,1);
+	// creates real data point and copies content to message buffer
+	offset += create_response_datapoint_led(offset, 0, 0);
+	offset += create_response_datapoint_led(offset, 0, 1);
+	offset += create_response_datapoint_led(offset, 0, 2);
 
-	size_datapoint_blue = create_response_datapoint_led(buffer + size_msgp1 + size_datapoint_red + size_datapoint_blue + size_datapoint_green, 0,2);
+	offset = fast_strcat(offset, "</obj>\0");
 
-	memcpy(buffer + size_msgp1 + size_datapoint_red + size_datapoint_green + size_datapoint_blue, msgp2, size_msgp2);
-
-	size_msg = size_msgp1 + size_msgp2 + size_datapoint_red + size_datapoint_green + size_datapoint_blue;
-
-	return size_msg;
+	return (uint8_t)(offset-buffer);
 }
 
 RESOURCE(leds, METHOD_GET | METHOD_PUT , "leds", "title=\"Leds Actuator\"");
@@ -1008,9 +834,11 @@ void led_red_handler(void* request, void* response, uint8_t *buffer,
 		newVal = get_bool_value_obix(payload_buffer);
 		if(newVal){
 			leds_on(LEDS_RED);
+			led_red=1;
 		}
 		else{
 			leds_off(LEDS_RED);
+			led_red=0;
 		}
 	}
 
@@ -1041,9 +869,11 @@ void led_green_handler(void* request, void* response, uint8_t *buffer,
 		newVal = get_bool_value_obix(payload_buffer);
 		if(newVal){
 			leds_on(LEDS_GREEN);
+			led_green=1;
 		}
 		else{
 			leds_off(LEDS_GREEN);
+			led_green=0;
 		}
 	}
 
@@ -1090,9 +920,11 @@ void led_blue_handler(void* request, void* response, uint8_t *buffer,
 		newVal = get_bool_value_obix(payload_buffer);
 		if(newVal){
 			leds_on(LEDS_BLUE);
+			led_blue=1;
 		}
 		else{
 			leds_off(LEDS_BLUE);
+			led_blue=0;
 		}
 	}
 	size_msg = create_response_datapoint_led(message, 0, 1);
