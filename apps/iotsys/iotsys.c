@@ -76,16 +76,16 @@ char payload_buffer[PUT_BUFFER_SIZE];
 
 gc_handler_t gc_handlers[MAX_GC_GROUPS];
 
+coap_packet_t request;
+
+static int msgid = 0;
 
 
 int get_bool_value_obix(char* obix_object){
-	PRINTF("Obix object is: %s\n", obix_object);
-	// value can either be true or false
+
 	if(strstr(obix_object, "true") != NULL){
-		PRINTF("obix value is true\n");
 		return 1;
 	}
-	PRINTF("obix value is false\n");
 	return 0;
 }
 
@@ -103,7 +103,6 @@ void send_message(const char* message, const uint16_t size_msg, void *request,
 	printf("length is: %d\n", length);
 
 	if (length <= 0) {
-		PRINTF("AHOYHOY?!\n");
 		REST.set_response_status(response, REST.status.INTERNAL_SERVER_ERROR);
 		err_msg = "calculation of message length error";
 		REST.set_response_payload(response, err_msg, strlen(err_msg));
@@ -161,7 +160,7 @@ char * iotsys_process_request(void* request, gc_handler groupCommHandler)
 	if( REST.get_method_type(request) == METHOD_PUT || REST.get_method_type(request) == METHOD_POST){
 		payload_len = REST.get_request_payload(request, &incoming);
 		memcpy(payload_buffer, incoming, payload_len);
-		payload_buffer[payload_len]=0;
+		payload_buffer[payload_len]=0;					//terminate the string!
 	}
 
 #if GROUP_COMM_ENABLED
@@ -216,10 +215,8 @@ void iotsys_send(void* request, void* response, uint8_t *buffer, uint16_t prefer
 	}
 	REST.set_header_content_type(response, REST.type.APPLICATION_XML);
 
-	// compute message once
+	// First block of the message
 	if (*offset <= 0) {
-
-
 		if (size_msg <= 0) {
 			PRINTF("ERROR while creating message!\n");
 			REST.set_response_status(response,
@@ -271,9 +268,7 @@ void get_ipv6_multicast_addr(char* input, uip_ip6addr_t* address){
 
 
 
-coap_packet_t request;
 
-static int msgid = 0;
 
 void send_coap_multicast(char* payload, size_t msgSize, uip_ip6addr_t* mc_address){
 	 coap_init_message(&request, COAP_TYPE_NON, COAP_PUT, msgid++ );
